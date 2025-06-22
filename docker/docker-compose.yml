@@ -1,0 +1,152 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crehana_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: task_manager
+      POSTGRES_USER: crehana_user
+      POSTGRES_PASSWORD: crehana_password
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crehana_user -d task_manager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: crehana_api_dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_SETTINGS_MODULE=dev_postgres
+    volumes:
+      - ../src:/app/src
+      - ../tests:/app/tests
+      - ../configs:/app/configs
+      - ../scripts:/app/scripts
+      - ../alembic:/app/alembic
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        echo 'Running migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting development server...' &&
+        uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  api-prod:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: crehana_api_prod
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      - APP_SETTINGS_MODULE=prod_postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        echo 'Running migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting production server...' &&
+        uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 4
+      "
+    profiles:
+      - production
+
+  test-runner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: crehana_tests
+    environment:
+      - APP_SETTINGS_MODULE=dev_postgres
+      - DATABASE_URL=sqlite:///./test.db
+    volumes:
+      - ../src:/app/src
+      - ../tests:/app/tests
+      - ../scripts:/app/scripts
+      - ../pytest.ini:/app/pytest.ini
+      - test_reports:/app/htmlcov
+    command: >
+      sh -c "
+        echo 'Running all tests...' &&
+        python scripts/run_tests.py all &&
+        echo 'Running linting...' &&
+        python scripts/lint.py check &&
+        echo 'Tests and linting completed!'
+      "
+    profiles:
+      - testing
+
+  linter:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: crehana_linter
+    volumes:
+      - ../src:/app/src
+      - ../tests:/app/tests
+      - ../scripts:/app/scripts
+      - ../.flake8:/app/.flake8
+      - ../pyproject.toml:/app/pyproject.toml
+    command: >
+      sh -c "
+        echo 'Running code formatting...' &&
+        python scripts/lint.py fix &&
+        echo 'Running final checks...' &&
+        python scripts/lint.py check &&
+        echo 'Linting completed!'
+      "
+    profiles:
+      - linting
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: crehana_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@crehana.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    profiles:
+      - admin
+
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  test_reports:
+    driver: local
+
+networks:
+  default:
+    name: crehana_network
